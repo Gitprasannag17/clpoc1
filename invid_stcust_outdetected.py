@@ -4,7 +4,8 @@ import numpy as np
 import io
 from google.cloud import vision, storage
 from scipy.spatial.distance import cosine
-
+from PIL import Image
+import imagehash
 
 # Set up authentication for local development
 if "GOOGLE_APPLICATION_CREDENTIALS" not in os.environ:
@@ -48,6 +49,7 @@ def detect_faces(image):
     faces = response.face_annotations
 
     face_embeddings = []
+    face_images = []
     for face in faces:
         if face.landmarks:
             embedding = np.array([
@@ -58,7 +60,15 @@ def detect_faces(image):
             ])
             face_embeddings.append(embedding)
 
-    return face_embeddings
+            # Crop the detected face from the image
+            x, y, width, height = int(face.bounding_poly.vertices[0].x), int(face.bounding_poly.vertices[0].y), \
+                                  int(face.bounding_poly.vertices[2].x - face.bounding_poly.vertices[0].x), \
+                                  int(face.bounding_poly.vertices[2].y - face.bounding_poly.vertices[0].y)
+
+            cropped_face = image[y:y + height, x:x + width]
+            face_images.append(cropped_face)
+
+    return face_embeddings, face_images
 
 # Function to load customer images and extract embeddings
 def load_customer_faces():
@@ -71,11 +81,16 @@ def load_customer_faces():
         image = np.frombuffer(image_bytes, dtype=np.uint8)
         image = cv2.imdecode(image, cv2.IMREAD_COLOR)
 
-        embeddings = detect_faces(image)
+        embeddings, _ = detect_faces(image)
         if embeddings:
             known_faces[blob.name] = embeddings[0]  # Assume 1 face per image
 
     return known_faces
+
+# Function to compute perceptual hash for an image
+def compute_image_hash(image):
+    pil_image = Image.fromarray(cv2.cvtColor(image, cv2.COLOR_BGR2RGB))
+    return imagehash.phash(pil_image)
 
 # Function to match a detected face with known customers
 def identify_person(face_embedding, known_faces):
@@ -107,18 +122,25 @@ def process_video(video_filename):
         # Load known customer embeddings
         known_faces = load_customer_faces()
 
+        # Track already saved face hashes
+        unique_faces_hashes = set()
+
         # Process each frame
         results = []
         for idx, frame in enumerate(frames):
-            face_embeddings = detect_faces(frame)
+            face_embeddings, face_images = detect_faces(frame)
 
-            for embedding in face_embeddings:
+            for embedding, face_image in zip(face_embeddings, face_images):
                 match_name, similarity_score = identify_person(embedding, known_faces)
 
                 if similarity_score < 0.3:  # Adjust threshold based on accuracy
-                    results.append((frame, match_name))
+                    image_hash = compute_image_hash(face_image)
 
-        # Save matched images
+                    if image_hash not in unique_faces_hashes:
+                        unique_faces_hashes.add(image_hash)
+                        results.append((face_image, match_name))
+
+        # Save unique matched images
         output_bucket = storage_client.bucket(OUTPUT_BUCKET)
         for i, (image, name) in enumerate(results):
             output_path = f"matched_{i}_{name}.jpg"
@@ -126,7 +148,7 @@ def process_video(video_filename):
             blob = output_bucket.blob(output_path)
             blob.upload_from_string(encoded_image.tobytes(), content_type="image/jpeg")
 
-        print(f"Processed video '{video_filename}' and saved matched images.")
+        print(f"Processed video '{video_filename}' and saved unique matched images.")
 
     except Exception as e:
         print(f"Error processing video: {e}")
