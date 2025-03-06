@@ -1,3 +1,4 @@
+
 # clpoc1
 
 Got it! You need to upload images from your **customer base bucket** for only those customers who appear in the **input video**.  
@@ -8,6 +9,9 @@ Got it! You need to upload images from your **customer base bucket** for only th
 3. **If a match is found, upload the corresponding customer image from the customer base bucket**.
 
 ---
+```
+pip install opencv-python google-cloud-storage google-cloud-vision deepface
+```
 
 ### **Implementation Plan**
 #### **1. Load Customer Images from Cloud Storage**

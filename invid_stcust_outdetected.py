@@ -81,7 +81,7 @@ def get_image_hash(image_content):
     """Returns hash of an image for comparison"""
     image = Image.open(io.BytesIO(image_content))
     print(f"finished get_image_hash")        
-    return imagehash.average_hash(image)
+    return imagehash.phash(image)
 
 def download_customer_images():
     print(f"started download_customer_images")     
@@ -114,6 +114,7 @@ def match_faces(detectedfaces):
         face_hash = get_image_hash(cv2.imencode('.jpg', face)[1].tobytes())
 
         for customer_name, customer_hash in customer_hashes.items():
+            print(f"{customer_name}: {customer_hash}, Difference: {face_hash - customer_hash}")
             if face_hash - customer_hash < 5:  # 5 is the similarity threshold
                 matched_customers.add(customer_name)
     print(f"finished match_faces") 
