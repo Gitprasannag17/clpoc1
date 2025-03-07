@@ -1,52 +1,55 @@
-#0. Set up authentication for local development
-import os
-from google.cloud import storage
 import cv2
-from google.cloud import vision
-import imagehash
-from PIL import Image
-import io
+import os
+from google.cloud import storage, vision
+from deepface import DeepFace
 
-
+# Set up authentication for local development
 if "GOOGLE_APPLICATION_CREDENTIALS" not in os.environ:
     os.system("gcloud auth application-default login")
 
 # Initialize Google Cloud Clients
-vision_client = vision.ImageAnnotatorClient()
 storage_client = storage.Client()
+vision_client = vision.ImageAnnotatorClient()
 
-#1.Load Customer Images from Cloud Storage
-#Retrieve all customer images from the customer base bucket:
-#from google.cloud import storage
+# Define Cloud Storage Buckets
+VIDEO_BUCKET = "clpoc1-input-video-bucket"
+CUSTOMER_BUCKET = "clpoc1-customerbase-bucket"
+OUTPUT_BUCKET = "clpoc1-customerdetected-bucket"
+video_filename="nitaakashshloka.mp4"
 
-#storage_client = storage.Client()
-#CUSTOMER_BUCKET = "clpoc1-customerbase-bucket"
+# Temporary storage for processing images
+TEMP_DIR = "/tmp/" if os.name != "nt" else "C:\\temp\\"  # Adjust for Windows
+
+# Ensure temp directory exists
+if not os.path.exists(TEMP_DIR):
+    os.makedirs(TEMP_DIR)
+
 
 def list_customer_images():
-    
-    print(f"started list_customer_images")
-    CUSTOMER_BUCKET = "clpoc1-customerbase-bucket"    
-    """Lists all images in the customer base bucket"""
+    """Lists all images in the customer base bucket."""
+    print(f"Fetching images from: {CUSTOMER_BUCKET}")  # Debugging print
     bucket = storage_client.bucket(CUSTOMER_BUCKET)
-    print(f"finished list_customer_images")
     return [blob.name for blob in bucket.list_blobs() if blob.name.endswith(('.jpg', '.png'))]
 
-#customer_images = list_customer_images()
-#print("Customer Images:", customer_images)
 
-#2. Extract Faces from Video using Google Cloud Vision
-#Use OpenCV to extract frames from the video, then use Google Cloud Vision to detect faces.
-#import cv2
-#from google.cloud import vision
+def detect_faces(image_bytes):
+    """Send image to Google Cloud Vision API for face detection"""
+    image = vision.Image(content=image_bytes)
+    response = vision_client.face_detection(image=image)
+    
+    if response.face_annotations:
+        print(f"Faces detected: {len(response.face_annotations)} ✅")
+        return True
+    else:
+        print("No faces detected in frame ❌")
+        return False
 
-#vision_client = vision.ImageAnnotatorClient()
 
 def extract_faces_from_video(video_path):
-    print(f"started extract_faces_from_video")
-    """Extracts faces from video frames"""
+    """Extracts faces from a video and saves them as images."""
     cap = cv2.VideoCapture(video_path)
     frame_count = 0
-    detected_faces = []
+    extracted_faces = []
 
     while cap.isOpened():
         ret, frame = cap.read()
@@ -55,131 +58,77 @@ def extract_faces_from_video(video_path):
 
         frame_count += 1
         if frame_count % 30 == 0:  # Process every 30th frame
+            frame = cv2.resize(frame, (800, 600))  # Resize to improve detection
             _, img_encoded = cv2.imencode('.jpg', frame)
             img_bytes = img_encoded.tobytes()
 
-            # Send image to Google Cloud Vision API
-            image = vision.Image(content=img_bytes)
-            response = vision_client.face_detection(image=image)
-
-            if response.face_annotations:
-                detected_faces.append(frame)
+            if detect_faces(img_bytes):  # Call Google Vision API
+                frame_path = os.path.join(TEMP_DIR, f"frame_{frame_count}.jpg")
+                cv2.imwrite(frame_path, frame)
+                extracted_faces.append(frame_path)
 
     cap.release()
-    print(f"finished extract_faces_from_video")    
-    return detected_faces
+    print(f"Extracted {len(extracted_faces)} frames with faces.")
+    return extracted_faces
 
-#3. Match Detected Faces with Customer Base Images
-#Compare extracted faces with customer images stored in the bucket using image hashing.
-
-#import imagehash
-#from PIL import Image
-#import io
-
-def get_image_hash(image_content):
-    print(f"started get_image_hash")    
-    """Returns hash of an image for comparison"""
-    image = Image.open(io.BytesIO(image_content))
-    print(f"finished get_image_hash")        
-    return imagehash.phash(image)
 
 def download_customer_images():
-    print(f"started download_customer_images")     
-
-    customer_images = list_customer_images()   
-    #"""Download customer images from the bucket for matching"""
-    customer_hashes = {}
-
-    CUSTOMER_BUCKET = "clpoc1-customerbase-bucket"    
-    bucket = storage_client.bucket(CUSTOMER_BUCKET)
+    """Download customer images from Cloud Storage for matching."""
+    customer_images = list_customer_images()
+    local_customer_images = {}
 
     for image_name in customer_images:
-        blob = bucket.blob(image_name)
-        image_bytes = blob.download_as_bytes()
-        customer_hashes[image_name] = get_image_hash(image_bytes)
-        print(f"hash: {customer_hashes[image_name]}")
-    print(f"finished download_customer_images")    
-    return customer_hashes
+        blob = storage_client.bucket(CUSTOMER_BUCKET).blob(image_name)
+        local_path = os.path.join(TEMP_DIR, image_name)
+        blob.download_to_filename(local_path)
+        local_customer_images[image_name] = local_path
 
-#customer_hashes = download_customer_images()
+    print(f"debug1")
+    return local_customer_images
 
-def match_faces(detectedfaces):
-    print(f"started match_faces")  
 
-    customer_hashes = download_customer_images()      
-    """Match detected faces with stored customer images"""
+def match_faces(detected_faces, customer_images):
+    """Match detected faces with stored customer images using DeepFace embeddings."""
     matched_customers = set()
-  
-    for face in detectedfaces:
-        face_hash = get_image_hash(cv2.imencode('.jpg', face)[1].tobytes())
 
-        for customer_name, customer_hash in customer_hashes.items():
-            print(f"{customer_name}: {customer_hash}, Difference: {face_hash - customer_hash}")
-            if face_hash - customer_hash < 5:  # 5 is the similarity threshold
-                matched_customers.add(customer_name)
-    print(f"finished match_faces") 
-    print(f"{len(matched_customers)}")     
+    for face_path in detected_faces:
+        for customer_name, customer_path in customer_images.items():
+            try:
+                result = DeepFace.verify(face_path, customer_path, model_name="Facenet", enforce_detection=False)
+                if result["verified"]:
+                    matched_customers.add(customer_name)
+                    print(f"✅ Match Found: {customer_name}")
+            except Exception as e:
+                print(f"Error processing {customer_name}: {e}")
+
     return matched_customers
 
-#matched_customers = match_faces(detected_faces)
-#print("Matched Customers:", matched_customers)
 
-#4. Upload Matched Customer Images to Output Bucket
-#If a customer appears in the video, upload their corresponding image from the customer base bucket.
-
-#OUTPUT_BUCKET = "clpoc1-customerdetected-bucket"
-
-def upload_matched_customers(faces):
-    print(f"started upload_matched_customers")     
-
-    matched_customers = match_faces(faces)
-    print(f"Detected {len(matched_customers)} matched_customers") 
-
-    CUSTOMER_BUCKET = "clpoc1-customerbase-bucket"    
-    
-    """Uploads matched customer images to another bucket"""
-    OUTPUT_BUCKET = "clpoc1-customerdetected-bucket"
+def upload_matched_customers(matched_customers):
+    """Uploads matched customer images to the output bucket."""
     output_bucket = storage_client.bucket(OUTPUT_BUCKET)
-    print(f"OUTPUT BUCKET is {OUTPUT_BUCKET}")    
 
     for customer in matched_customers:
         blob = storage_client.bucket(CUSTOMER_BUCKET).blob(customer)
         new_blob = output_bucket.blob(customer)
         new_blob.upload_from_string(blob.download_as_bytes())
-        print(f"Uploaded {customer} to {OUTPUT_BUCKET}")
+        print(f"🚀 Uploaded {customer} to {OUTPUT_BUCKET}")
 
-    print(f"finished upload_matched_customers") 
 
-#upload_matched_customers()
-# Main function to process video and identify customers
-def process_video(video_filename):
-    try:
-        print(f"Processing video: {video_filename}")
+# Main Execution
+if __name__ == "__main__":
+    bucket = storage_client.bucket(VIDEO_BUCKET)
+    blob = bucket.blob(video_filename)
+    video_path = f"/{video_filename}"
 
-        # Download video from Cloud Storage
-        VIDEO_BUCKET="clpoc1-input-video-bucket"
+    # Step 1: Extract Faces from Video
+    detected_faces = extract_faces_from_video(video_path)
 
-        bucket = storage_client.bucket(VIDEO_BUCKET)
-        blob = bucket.blob(video_filename)
-        local_video_path = f"/{video_filename}"
-        blob.download_to_filename(local_video_path) #
+    # Step 2: Download Customer Images
+    customer_images = download_customer_images()
 
-        # Extract faces
-        faces = extract_faces_from_video(local_video_path)
-        print(f"Detected {len(faces)} faces.")
+    # Step 3: Match Faces with Customer Base
+    matched_customers = match_faces(detected_faces, customer_images)
 
-        #customer_images = list_customer_images()
-
-        #customer_hashes = download_customer_images()
-
-        #matched_customers = match_faces(faces)
-
-        #CUSTOMER_BUCKET = "clpoc1-customerbase-bucket"
-
-        upload_matched_customers(faces)
-
-    except Exception as e:
-        print(f"Error processing video: {e}")
-                                           
-# Run the function
-process_video("nitaakashshloka.mp4")
+    # Step 4: Upload Matched Customers' Images to Output Bucket
+    upload_matched_customers(matched_customers)
