@@ -4,7 +4,8 @@ import cv2
 import numpy as np
 import io
 from google.cloud import vision, storage
-from scipy.spatial.distance import cosine
+#from scipy.spatial.distance import cosine
+from scipy.spatial.distance import euclidean
 
 
 # Set up authentication for local development
@@ -16,7 +17,7 @@ vision_client = vision.ImageAnnotatorClient()
 storage_client = storage.Client()
 
 # Define GCP Storage buckets
-INPUTIMAGE_BUCKET = "clpoc1-input-image-bucket1"
+INPUTIMAGE_BUCKET = "clpoc1-input-image-bucket"
 CUSTOMER_IMAGES_BUCKET = "clpoc1-customerbase-bucket0"
 OUTPUT_BUCKET = "clpoc1-customerdetected-bucket0"
 
@@ -32,12 +33,10 @@ def detect_faces(image):
     face_embeddings = []
     for face in faces:
         if face.landmarks:
-            embedding = np.array([
-                face.detection_confidence,
-                face.landmarks[0].position.x,
-                face.landmarks[0].position.y,
-                face.landmarks[0].position.z,
-            ])
+            embedding = np.array([face.detection_confidence] + 
+                                 [lm.position.x for lm in face.landmarks] + 
+                                 [lm.position.y for lm in face.landmarks] + 
+                                 [lm.position.z for lm in face.landmarks])
             face_embeddings.append(embedding)
 
     return face_embeddings
@@ -60,15 +59,16 @@ def load_customer_faces():
     return known_faces
 
 # Function to match a detected face with known customers
+
 def identify_person(face_embedding, known_faces):
     best_match = None
-    best_score = float("inf")
+    best_score = float("inf")  # Euclidean distance: lower is better
 
     for name, known_embedding in known_faces.items():
-        score = cosine(face_embedding, known_embedding)
+        score = euclidean(face_embedding, known_embedding)  # Use Euclidean instead of Cosine
         if score < best_score:
             best_score = score
-            best_match = name
+            best_match = name            
 
     return best_match, best_score
 
